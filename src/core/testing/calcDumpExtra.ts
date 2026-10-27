@@ -8,7 +8,12 @@ import { Interval } from '../util/interval';
 import { CATEGORY_TYPES, ClientPerformanceSnapshot } from '../snapshot/clientPerformanceSnapshot';
 import { CapitalGainsRecord, CostMethod, SecurityPerformanceRecord, SecurityPerformanceSnapshot, TaxesAndFees } from '../snapshot/securityPerformance';
 import { ClientClassificationFilter, ClientFilter, PortfolioClientFilter, WithoutTaxesFilter } from '../snapshot/filters';
-import { formatISODate } from '../util/dates';
+import { formatISODate, formatISODateTime } from '../util/dates';
+import { Trade, TradeCollector, TradeCollectorException, TradeGrouping, TradeTotals } from '../snapshot/trades';
+import { calculatePayments, PaymentsMode } from '../snapshot/payments';
+import { ReportingPeriod } from '../snapshot/reportingPeriod';
+import { aggregate, AggregationPeriod, AllTimeHigh, performanceIndexForSecurity } from '../snapshot/securityIndex';
+import { RELATIVE_TO } from './calcDump';
 
 function m(v: Money | null): string | null {
   return v === null ? null : `${v.currencyCode} ${v.amount}`;
@@ -144,4 +149,142 @@ export function addIndexExtras(
   o.filtered = filtered;
 }
 
-export function addClientExtras(_root: Record<string, unknown>, _client: Client, _converter: CurrencyConverter): void {}
+function trade(t: Trade): unknown[] {
+  return [
+    [t.security.uuid, t.portfolio.unwrap().uuid, formatISODateTime(t.start), t.end === null ? 'open' : formatISODateTime(t.end), t.shares].join('|'),
+    m(t.entryValue),
+    m(t.entryValueWithoutTaxesAndFees),
+    m(t.exitValue),
+    m(t.exitValueWithoutTaxesAndFees),
+    m(t.getProfitLoss()),
+    m(t.getProfitLossWithoutTaxesAndFees()),
+    m(t.getProfitLossMovingAverage()),
+    m(t.getProfitLossMovingAverageWithoutTaxesAndFees()),
+    t.holdingPeriod,
+    d(t.irr),
+    d(t.getReturn()),
+    d(t.getReturnMovingAverage()),
+    t.transactions.length,
+    t.isLong(),
+  ];
+}
+
+export function addClientExtras(root: Record<string, unknown>, client: Client, converter: CurrencyConverter): void {
+  for (const grouping of ['COMBINED', 'PER_LOT'] as TradeGrouping[]) {
+    const collector = new TradeCollector(client, converter, grouping);
+    const trades: Trade[] = [];
+    const lines: unknown[][] = [];
+    const errors: string[] = [];
+    for (const s of client.securities) {
+      try {
+        const list = collector.collect(s);
+        trades.push(...list);
+        for (const t of list) lines.push(trade(t));
+      } catch (e) {
+        if (!(e instanceof TradeCollectorException)) throw e;
+        errors.push(s.uuid);
+      }
+    }
+    const totals = new TradeTotals(trades, converter);
+    lines.sort((a, b) => ((a[0] as string) < (b[0] as string) ? -1 : (a[0] as string) > (b[0] as string) ? 1 : 0));
+    root[`trades-${grouping}`] = {
+      trades: lines,
+      errors,
+      totals: [
+        totals.tradeCount,
+        totals.totalShares,
+        m(totals.totalEntryValue),
+        m(totals.totalEntryValueMovingAverage),
+        m(totals.totalExitValue),
+        m(totals.totalProfitLoss),
+        m(totals.totalProfitLossWithoutTaxesAndFees),
+        m(totals.totalProfitLossMovingAverage),
+        m(totals.totalProfitLossMovingAverageWithoutTaxesAndFees),
+        totals.averageHoldingPeriod,
+        d(totals.averageIRR),
+        d(totals.averageReturn),
+        d(totals.getAverageReturnMovingAverage()),
+      ],
+    };
+  }
+
+  const payments: Record<string, unknown> = {};
+  const modes: PaymentsMode[] = ['DIVIDENDS', 'INTEREST', 'EARNINGS', 'TAXES', 'FEES', 'TRADES', 'ALL', 'SAVING'];
+  for (const mode of modes) {
+    for (const gross of [true, false]) {
+      for (const cm of ['FIFO', 'MOVING_AVERAGE'] as CostMethod[]) {
+        const includesTrades = mode === 'TRADES' || mode === 'ALL';
+        if (cm === 'MOVING_AVERAGE' && !includesTrades) continue;
+        if (!gross && mode !== 'DIVIDENDS' && mode !== 'EARNINGS') continue;
+        const r = calculatePayments(client, client, converter, {
+          startYear: 2019,
+          mode,
+          useGrossValue: gross,
+          useConsolidateRetired: true,
+          costMethod: cm,
+        });
+        const lines: Record<string, string> = {};
+        for (const line of r.lines) {
+          let b = String(line.sum);
+          for (let ii = 0; ii < r.noOfMonths; ii++)
+            if (line.values[ii] !== 0) b += `,${ii}=${line.values[ii]}/${line.numTransactions[ii]}`;
+          lines[line.vehicle!.uuid] = b;
+        }
+        payments[`${mode}-${gross}-${cm}`] = {
+          months: r.noOfMonths,
+          sum: r.sum.sum,
+          values: r.sum.values,
+          counts: r.sum.numTransactions,
+          retired: r.sumRetired.sum,
+          lines: sortKeys(lines),
+          transactions: r.transactions.length,
+        };
+      }
+    }
+  }
+  root.payments = payments;
+
+  const benchmarks: Record<string, unknown> = {};
+  for (const code of ['L1Y0', 'L3Y0', 'Y2021', 'S2017-12-01']) {
+    const interval = ReportingPeriod.from(code).toInterval(RELATIVE_TO);
+    const clientIndex = performanceIndexForClient(client, converter, interval);
+    const bm: Record<string, unknown> = {};
+    for (const s of client.securities) {
+      const si = performanceIndexForSecurity(clientIndex, s);
+      const ath = new AllTimeHigh(s, interval);
+      bm[s.uuid] = {
+        dates: `${formatISODate(si.dates[0])}..${formatISODate(si.dates[si.dates.length - 1])}`,
+        totals: si.totals,
+        accumulated: si.accumulated,
+        irr: d(si.getPerformanceIRR()),
+        ath: [
+          ath.value,
+          ath.date === null ? null : formatISODate(ath.date),
+          ath.low,
+          ath.lowDate === null ? null : formatISODate(ath.lowDate),
+          ath.distance === null ? null : d(ath.distance),
+          ath.relLowDistance === null ? null : d(ath.relLowDistance),
+        ],
+      };
+    }
+    for (const period of ['WEEKLY', 'MONTHLY', 'QUARTERLY', 'YEARLY'] as AggregationPeriod[]) {
+      const ai = aggregate(clientIndex, period);
+      bm[`aggregation-${period}`] = {
+        dates: ai.dates.map(formatISODate),
+        accumulated: ai.accumulated,
+        delta: ai.delta,
+        inbound: ai.inboundTransferals,
+        outbound: ai.outboundTransferals,
+        totals: ai.totals,
+      };
+    }
+    benchmarks[code] = bm;
+  }
+  root.benchmarks = benchmarks;
+}
+
+function sortKeys<T>(o: Record<string, T>): Record<string, T> {
+  const r: Record<string, T> = {};
+  for (const k of Object.keys(o).sort()) r[k] = o[k];
+  return r;
+}

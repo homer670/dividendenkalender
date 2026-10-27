@@ -22,7 +22,9 @@ describe('calculations match Portfolio Performance', () => {
   for (const f of files) {
     it(f, async () => {
       const raw = readFileSync(join(dir, f));
-      const expected = JSON.parse((f.endsWith('.gz') ? gunzipSync(raw) : raw).toString('utf-8'));
+      const text = (f.endsWith('.gz') ? gunzipSync(raw) : raw).toString('utf-8');
+      // gson writes NaN and Infinity as bare tokens
+      const expected = JSON.parse(text.replace(/([[,:])(-?Infinity|NaN)(?=[,\]}])/g, '$1"$2"'));
       setToday(parseDate(expected.today));
       const data = new Uint8Array(readFileSync(join(dir, f.replace(/\.calc\.json(\.gz)?$/, ''))));
       const { client } = await loadClientFile(data, 'geheim');
@@ -33,7 +35,7 @@ describe('calculations match Portfolio Performance', () => {
         new SecurityBasedExchangeRateProvider(),
       ]);
       const converter = new CurrencyConverterImpl(factory, client.baseCurrency);
-      const actual = JSON.parse(JSON.stringify(dumpCalc(client, converter)));
+      const actual = JSON.parse(JSON.stringify(dumpCalc(client, converter), (_k, v) => (typeof v === 'number' && !Number.isFinite(v) ? String(v) : v)));
       delete expected.today;
       const diffs = compareDeep(expected, actual);
       expect(diffs).toEqual([]);
