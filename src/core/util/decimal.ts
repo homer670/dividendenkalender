@@ -6,6 +6,7 @@ import Decimal from 'decimal.js';
 
 /** "Exact" arithmetic (BigDecimal without MathContext). */
 export const D = Decimal.clone({ precision: 120, rounding: Decimal.ROUND_HALF_UP, toExpNeg: -100, toExpPos: 100 });
+// eslint-disable-next-line @typescript-eslint/no-redeclare
 export type D = Decimal;
 
 /** Arithmetic with Values.MC = new MathContext(10, RoundingMode.HALF_UP). */

@@ -1,0 +1,3 @@
+oracle.TestExchangeRateProvider
+name.abuchen.portfolio.money.impl.FixedExchangeRateProvider
+name.abuchen.portfolio.money.impl.SecurityBasedExchangeRateProvider

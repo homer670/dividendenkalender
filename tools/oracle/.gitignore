@@ -1,0 +1,11 @@
+.pp/
+target/
+cp.txt
+# copied from Portfolio Performance by setup.sh
+src/main/java/name/abuchen/portfolio/*
+!src/main/java/name/abuchen/portfolio/model/
+src/main/java/name/abuchen/portfolio/model/*
+!src/main/java/name/abuchen/portfolio/model/OracleAccess.java
+!src/main/java/name/abuchen/portfolio/pdfbox1/
+!src/main/java/name/abuchen/portfolio/pdfbox3/
+src/main/resources/name/
